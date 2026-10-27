@@ -1,0 +1,68 @@
+name: Testar no simulador iOS (nuvem)
+
+on:
+  workflow_dispatch:   # só roda quando você clicar em "Run workflow"
+
+jobs:
+  simulador:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar Cordova
+        run: npm install -g cordova
+
+      - name: Dependências do projeto
+        run: |
+          if [ -f package-lock.json ]; then npm ci; elif [ -f package.json ]; then npm install; fi
+
+      - name: Adicionar plataforma iOS
+        run: |
+          if [ ! -d platforms/ios ]; then cordova platform add ios; fi
+          cordova prepare ios
+
+      - name: Compilar para o simulador
+        working-directory: platforms/ios
+        run: |
+          if ls -d *.xcworkspace >/dev/null 2>&1; then
+            WS=$(ls -d *.xcworkspace | head -1); SCHEME="${WS%.xcworkspace}"
+            TARGET=(-workspace "$WS")
+          else
+            PJ=$(ls -d *.xcodeproj | head -1); SCHEME="${PJ%.xcodeproj}"
+            TARGET=(-project "$PJ")
+          fi
+          xcodebuild "${TARGET[@]}" -scheme "$SCHEME" -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO
+
+      - name: Abrir o app no simulador e gravar
+        run: |
+          mkdir -p saida
+          APP=$(ls -d platforms/ios/build/Build/Products/Debug-iphonesimulator/*.app | head -1)
+          BID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist")
+          UDID=$(xcrun simctl list devices available | grep -m1 "iPhone" | grep -oE '[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}')
+          echo "Simulador: $UDID  App: $BID"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" "$APP"
+          xcrun simctl io "$UDID" recordVideo --codec=h264 saida/video.mp4 &
+          REC=$!
+          sleep 3
+          xcrun simctl launch "$UDID" "$BID"
+          sleep 8
+          xcrun simctl io "$UDID" screenshot saida/tela1.png
+          sleep 7
+          xcrun simctl io "$UDID" screenshot saida/tela2.png
+          kill -INT $REC || true
+          wait $REC || true
+          (cd "$(dirname "$APP")" && zip -qr "$GITHUB_WORKSPACE/saida/app-simulador.zip" "$(basename "$APP")")
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resultado-simulador
+          path: saida/
